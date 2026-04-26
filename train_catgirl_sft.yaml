@@ -1,0 +1,41 @@
+# 模型与路径
+model_name_or_path: /mnt/workspace/models/Qwen3.5-4B
+template: qwen         
+stage: sft
+do_train: true
+finetuning_type: lora
+
+# LoRA 配置
+lora_target: all
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.1
+
+# 数据集
+dataset: catgirl_sft
+cutoff_len: 2048
+val_size: 0.05
+
+### train
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-5
+num_train_epochs: 1
+lr_scheduler_type: cosine
+warmup_steps: 20
+bf16: true
+
+### saving
+output_dir: saves/qwen35-4b/lora/catgirl_sft
+overwrite_output_dir: true
+logging_steps: 10
+save_steps: 100
+save_total_limit: 2
+plot_loss: true
+# output_dir: saves/qwen3.5-4b/lora/catgirl
+# overwrite_output_dir: true
+
+# SwanLab
+use_swanlab: true
+swanlab_project: catgirl_sft
+swanlab_run_name: qwen35_4b_catgirl_lora

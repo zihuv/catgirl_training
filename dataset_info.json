@@ -1,0 +1,10 @@
+{
+  "catgirl_sft": {
+    "file_name": "catgirl_sft.json",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "conversations",
+      "system": "system"
+    }
+  }
+}
