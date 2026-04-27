@@ -4,7 +4,7 @@ import inspect
 import torch
 from datasets import Dataset
 
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModelForCausalLM, TrainerCallback
 from peft import PeftModel, LoraConfig, TaskType, get_peft_model
 from trl import GRPOConfig, GRPOTrainer
 
@@ -154,7 +154,139 @@ print(f"Using {len(dataset)} prompts for this run")
 
 
 # =========================
-# 8. GRPO 参数
+# 8. 训练中抽样生成到 SwanLab
+# =========================
+
+sample_every_steps = int(os.getenv("SAMPLE_EVERY_STEPS", "50"))
+sample_prompt_count = int(os.getenv("SAMPLE_PROMPT_COUNT", "3"))
+sample_max_new_tokens = int(os.getenv("SAMPLE_MAX_NEW_TOKENS", "220"))
+sample_seed = int(os.getenv("SAMPLE_SEED", "2026"))
+
+
+def _input_device(model):
+    try:
+        return model.get_input_embeddings().weight.device
+    except Exception:
+        return next(model.parameters()).device
+
+
+class SwanLabGenerationSampleCallback(TrainerCallback):
+    def __init__(
+        self,
+        tokenizer,
+        samples,
+        every_steps: int,
+        max_new_tokens: int,
+        temperature: float,
+        top_p: float,
+    ):
+        self.tokenizer = tokenizer
+        self.samples = list(samples)
+        self.every_steps = every_steps
+        self.max_new_tokens = max_new_tokens
+        self.temperature = temperature
+        self.top_p = top_p
+
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        if (
+            model is None
+            or self.every_steps <= 0
+            or state.global_step == 0
+            or state.global_step % self.every_steps != 0
+            or not getattr(state, "is_world_process_zero", True)
+        ):
+            return control
+
+        was_training = model.training
+        model.eval()
+        rows = []
+
+        try:
+            for index, sample in enumerate(self.samples, start=1):
+                prompt = sample["prompt"]
+                inputs = self.tokenizer(prompt, return_tensors="pt")
+                inputs = {key: value.to(_input_device(model)) for key, value in inputs.items()}
+
+                with torch.no_grad():
+                    output_ids = model.generate(
+                        **inputs,
+                        max_new_tokens=self.max_new_tokens,
+                        do_sample=True,
+                        temperature=self.temperature,
+                        top_p=self.top_p,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                        eos_token_id=self.tokenizer.eos_token_id,
+                    )
+
+                prompt_len = inputs["input_ids"].shape[-1]
+                completion = self.tokenizer.decode(
+                    output_ids[0][prompt_len:],
+                    skip_special_tokens=True,
+                ).strip()
+
+                rows.append(
+                    {
+                        "index": index,
+                        "prompt": prompt,
+                        "completion": completion,
+                        "reference_output": sample.get("reference_output", ""),
+                        "type": sample.get("type", ""),
+                    }
+                )
+        finally:
+            if was_training:
+                model.train()
+
+        report = [f"GRPO generation samples at step {state.global_step}"]
+        for row in rows:
+            report.append(
+                "\n".join(
+                    [
+                        f"\n--- sample {row['index']} | type={row['type']} ---",
+                        "[prompt]",
+                        row["prompt"],
+                        "[completion]",
+                        row["completion"],
+                        "[reference]",
+                        row["reference_output"],
+                    ]
+                )
+            )
+
+        text = "\n".join(report)
+        print(text)
+
+        try:
+            import swanlab
+
+            swanlab.log(
+                {
+                    "samples/grpo_generations": swanlab.Text(
+                        text,
+                        caption=f"step {state.global_step}",
+                    )
+                },
+                step=state.global_step,
+            )
+        except Exception as exc:
+            print(f"SwanLab sample logging skipped: {exc}")
+
+        return control
+
+
+sample_dataset = []
+if sample_every_steps > 0 and sample_prompt_count > 0 and len(dataset) > 0:
+    sample_dataset = dataset.shuffle(seed=sample_seed).select(
+        range(min(sample_prompt_count, len(dataset)))
+    )
+    print(
+        "SwanLab generation sampling enabled: "
+        f"{len(sample_dataset)} prompts every {sample_every_steps} steps"
+    )
+
+
+# =========================
+# 9. GRPO 参数
 # =========================
 output_dir = "./catgirl_grpo_lora_output"
 use_vllm = os.getenv("USE_VLLM", "0") == "1"
@@ -165,8 +297,8 @@ vllm_enable_sleep_mode = os.getenv("VLLM_ENABLE_SLEEP_MODE", "1") == "1"
 grpo_config_kwargs = {
     "output_dir": output_dir,
     "num_train_epochs": 1,
-    "per_device_train_batch_size": 1,
-    "gradient_accumulation_steps": 4,
+    "per_device_train_batch_size": 2,
+    "gradient_accumulation_steps": 2,
     "learning_rate": 2e-6,
     "logging_steps": 1,
     "save_steps": 50,
@@ -200,10 +332,23 @@ training_args = GRPOConfig(**grpo_config_kwargs)
 
 
 # =========================
-# 9. 创建 Trainer
+# 10. 创建 Trainer
 # =========================
 
 print("创建 GRPOTrainer...")
+
+callbacks = []
+if sample_dataset:
+    callbacks.append(
+        SwanLabGenerationSampleCallback(
+            tokenizer=tokenizer,
+            samples=sample_dataset,
+            every_steps=sample_every_steps,
+            max_new_tokens=sample_max_new_tokens,
+            temperature=grpo_config_kwargs.get("temperature", 0.8),
+            top_p=grpo_config_kwargs.get("top_p", 0.9),
+        )
+    )
 
 trainer = GRPOTrainer(
     model=model,
@@ -211,11 +356,12 @@ trainer = GRPOTrainer(
     train_dataset=dataset,
     reward_funcs=catgirl_reward_func,
     processing_class=tokenizer,
+    callbacks=callbacks,
 )
 
 
 # =========================
-# 10. 开始训练
+# 11. 开始训练
 # =========================
 
 print("开始 GRPO 训练...")
@@ -224,7 +370,7 @@ trainer.train()
 
 
 # =========================
-# 11. 保存 GRPO LoRA
+# 12. 保存 GRPO LoRA
 # =========================
 
 final_dir = os.path.join(output_dir, "final")
