@@ -1,13 +1,12 @@
 # Catgirl TRL Training User Guide
 
-流程是：
+这是单卡版本的使用手册。流程是：
 
 1. 准备 JSONL 数据
 2. 用 TRL 做 SFT LoRA
 3. 合并 SFT LoRA，得到 vLLM 可加载的 SFT 模型
-4. 启动 vLLM server
-5. 用 TRL GRPOTrainer 训练 GRPO LoRA
-6. 试聊验证 SFT 或 SFT+GRPO 效果
+4. 用 TRL GRPOTrainer + vLLM colocate 训练 GRPO LoRA
+5. 试聊验证 SFT 或 SFT+GRPO 效果
 
 ## 目录结构
 
@@ -18,10 +17,8 @@ catgirl/
   train_sft_trl.py
   merge_sft_lora.py
   train_grpo_trl_vllm.py
-  train_catgirl_grpo.py          # 兼容入口，等同 train_grpo_trl_vllm.py
   catgirl_reward.py
   chat_catgirl.py
-  talk_catgirl_sft_grpo.py       # 兼容入口，等同 chat_catgirl.py
   configs/
     sft_qwen35_4b.json
     grpo_qwen35_4b_vllm.json
@@ -123,11 +120,10 @@ CUDA_VISIBLE_DEVICES=0 python train_sft_trl.py \
   --config configs/sft_qwen35_4b.json
 ```
 
-多卡：
+如果显存够，可以在 `configs/sft_qwen35_4b.json` 里调大：
 
-```bash
-CUDA_VISIBLE_DEVICES=0,1 accelerate launch train_sft_trl.py \
-  --config configs/sft_qwen35_4b.json
+```text
+per_device_train_batch_size
 ```
 
 SFT 输出：
@@ -138,7 +134,7 @@ saves/qwen35-4b/sft_lora
 
 ## 合并 SFT LoRA
 
-vLLM server 建议加载合并后的 SFT 模型：
+vLLM 建议加载合并后的 SFT 模型：
 
 ```bash
 python merge_sft_lora.py \
@@ -153,27 +149,9 @@ python merge_sft_lora.py \
 saves/qwen35-4b/sft_merged
 ```
 
-## 启动 vLLM Server
-
-建议用单独 GPU 跑 vLLM，例如 GPU 1：
-
-```bash
-CUDA_VISIBLE_DEVICES=1 trl vllm-serve \
-  --model saves/qwen35-4b/sft_merged \
-  --tensor-parallel-size 1 \
-  --dtype bfloat16 \
-  --gpu-memory-utilization 0.85 \
-  --max-model-len 2048 \
-  --port 8000
-```
-
-保持这个终端不要关闭。
-
-如果 vLLM server 报显存不足，把 `--gpu-memory-utilization` 调低到 `0.75` 或 `0.70`。
-
 ## 训练 GRPO
 
-另开一个终端，用另一张 GPU 跑 trainer，例如 GPU 0：
+单卡默认使用 vLLM colocate，也就是训练和 vLLM 生成共用同一张显卡。不需要单独启动 `trl vllm-serve`。
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 accelerate launch train_grpo_trl_vllm.py \
@@ -203,6 +181,23 @@ GRPO 输出：
 ```text
 saves/qwen35-4b/grpo_lora
 ```
+
+如果单卡 colocate 显存不足，先把配置里的显存占用调低：
+
+```json
+"vllm_gpu_memory_utilization": 0.22
+```
+
+如果仍然 OOM，再临时关掉 vLLM 兜底：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 accelerate launch train_grpo_trl_vllm.py \
+  --config configs/grpo_qwen35_4b_vllm.json \
+  --no-vllm \
+  --debug-sample-size 20
+```
+
+关掉 vLLM 会慢很多，但可以确认训练逻辑和 reward 没问题。
 
 ## 试聊
 
@@ -268,10 +263,20 @@ packing 保持 true
 GRPO 想更快：
 
 ```text
-优先确认 vLLM server 正常工作
+优先确认 vLLM colocate 正常工作
 logging_steps 从 5 调到 10
 max_completion_length 从 320 调到 256
 num_generations 从 4 调到 3
+```
+
+单卡 vLLM colocate 想更稳：
+
+```text
+vllm_gpu_memory_utilization 先用 0.28
+OOM 就降到 0.22
+稳定后可试 0.32 或 0.35
+per_device_train_batch_size 默认 1
+显存很宽裕再试 2
 ```
 
 GRPO 猫娘味不够：
@@ -297,11 +302,9 @@ GRPO 任务能力下降：
 ```bash
 python prepare_catgirl_data.py --input NekoQA-30K.json --output-dir data --sft-size 20000 --grpo-size 1000 --eval-size 500
 
-CUDA_VISIBLE_DEVICES=0,1 accelerate launch train_sft_trl.py --config configs/sft_qwen35_4b.json
+CUDA_VISIBLE_DEVICES=0 python train_sft_trl.py --config configs/sft_qwen35_4b.json
 
 python merge_sft_lora.py --base-model /root/models/Qwen3.5-4B --sft-lora saves/qwen35-4b/sft_lora --output-dir saves/qwen35-4b/sft_merged
-
-CUDA_VISIBLE_DEVICES=1 trl vllm-serve --model saves/qwen35-4b/sft_merged --tensor-parallel-size 1 --dtype bfloat16 --gpu-memory-utilization 0.85 --max-model-len 2048 --port 8000
 
 CUDA_VISIBLE_DEVICES=0 accelerate launch train_grpo_trl_vllm.py --config configs/grpo_qwen35_4b_vllm.json --debug-sample-size 20
 

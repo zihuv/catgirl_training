@@ -102,17 +102,20 @@ def main() -> int:
         task_type=TaskType.CAUSAL_LM,
     )
 
+    vllm_mode = get_value(args, config, "vllm_mode", "colocate")
+    use_vllm = bool(get_value(args, config, "use_vllm", True))
     vllm_server_host = get_value(args, config, "vllm_server_host", "0.0.0.0")
     vllm_server_port = int(get_value(args, config, "vllm_server_port", 8000))
     vllm_group_port = int(get_value(args, config, "vllm_group_port", 51216))
-    os.environ.setdefault("MASTER_ADDR", str(vllm_server_host))
-    os.environ.setdefault("MASTER_PORT", str(vllm_group_port))
+    if use_vllm and vllm_mode == "server":
+        os.environ.setdefault("MASTER_ADDR", str(vllm_server_host))
+        os.environ.setdefault("MASTER_PORT", str(vllm_group_port))
 
     grpo_args = {
         "output_dir": output_dir,
         "num_train_epochs": float(get_value(args, config, "num_train_epochs", 1.0)),
-        "per_device_train_batch_size": int(get_value(args, config, "per_device_train_batch_size", 2)),
-        "gradient_accumulation_steps": int(get_value(args, config, "gradient_accumulation_steps", 2)),
+        "per_device_train_batch_size": int(get_value(args, config, "per_device_train_batch_size", 1)),
+        "gradient_accumulation_steps": int(get_value(args, config, "gradient_accumulation_steps", 4)),
         "learning_rate": float(get_value(args, config, "learning_rate", 1.5e-6)),
         "lr_scheduler_type": config.get("lr_scheduler_type", "cosine"),
         "warmup_ratio": float(config.get("warmup_ratio", 0.03)),
@@ -130,18 +133,28 @@ def main() -> int:
         "mask_truncated_completions": bool(config.get("mask_truncated_completions", True)),
         "report_to": get_value(args, config, "report_to", "swanlab"),
         "run_name": get_value(args, config, "run_name", "qwen35-4b-catgirl-grpo-vllm"),
-        "use_vllm": bool(get_value(args, config, "use_vllm", True)),
-        "vllm_mode": get_value(args, config, "vllm_mode", "server"),
-        "vllm_server_host": vllm_server_host,
-        "vllm_server_port": vllm_server_port,
-        "vllm_group_port": vllm_group_port,
-        "vllm_server_base_url": get_value(args, config, "vllm_server_base_url", None),
-        "vllm_gpu_memory_utilization": float(get_value(args, config, "vllm_gpu_memory_utilization", 0.55)),
-        "vllm_tensor_parallel_size": int(get_value(args, config, "vllm_tensor_parallel_size", 1)),
-        "vllm_enable_sleep_mode": bool(get_value(args, config, "vllm_enable_sleep_mode", False)),
+        "use_vllm": use_vllm,
+        "vllm_mode": vllm_mode,
         "chat_template_kwargs": config.get("chat_template_kwargs", {"enable_thinking": False}),
         "reward_weights": config.get("reward_weights", [1.0, 1.0, 1.0, 1.0]),
     }
+    if use_vllm and vllm_mode == "server":
+        grpo_args.update(
+            {
+                "vllm_server_host": vllm_server_host,
+                "vllm_server_port": vllm_server_port,
+                "vllm_group_port": vllm_group_port,
+                "vllm_server_base_url": get_value(args, config, "vllm_server_base_url", None),
+            }
+        )
+    elif use_vllm and vllm_mode == "colocate":
+        grpo_args.update(
+            {
+                "vllm_gpu_memory_utilization": float(get_value(args, config, "vllm_gpu_memory_utilization", 0.28)),
+                "vllm_tensor_parallel_size": int(get_value(args, config, "vllm_tensor_parallel_size", 1)),
+                "vllm_enable_sleep_mode": bool(get_value(args, config, "vllm_enable_sleep_mode", True)),
+            }
+        )
     training_args = GRPOConfig(**pick_supported(GRPOConfig, grpo_args))
 
     trainer = GRPOTrainer(
