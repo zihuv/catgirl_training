@@ -48,11 +48,18 @@ conda activate catgirl
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
 
-安装训练依赖：
+Qwen3.5：
 
 ```bash
-pip install "transformers>=4.57.0" "datasets>=4.0.0" "accelerate>=1.10.0" peft swanlab
-pip install "trl[vllm]"
+pip install "transformers>=5.2.0" "datasets>=4.0.0" "accelerate>=1.10.0" peft swanlab modelscope
+pip install -U trl
+uv pip install -U vllm --torch-backend=auto --extra-index-url https://wheels.vllm.ai/nightly
+```
+
+如果没有安装 `uv`：
+
+```bash
+pip install uv
 ```
 
 安装后检查：
@@ -61,6 +68,7 @@ pip install "trl[vllm]"
 python -c "import torch, trl, vllm; print(torch.__version__, trl.__version__, vllm.__version__)"
 python -c "from trl import SFTTrainer, GRPOTrainer; print('TRL ok')"
 ```
+
 
 ## 准备模型路径
 
@@ -77,6 +85,7 @@ configs/sft_qwen35_4b.json
 ```
 
 把 `model_name_or_path` 改成你的实际模型路径。
+
 
 ## 准备数据
 
@@ -118,6 +127,28 @@ python prepare_catgirl_data.py \
 ```bash
 CUDA_VISIBLE_DEVICES=0 python train_sft_trl.py \
   --config configs/sft_qwen35_4b.json
+```
+
+如果报：
+
+```text
+Your setup doesn't support bf16/gpu
+```
+
+使用当前默认配置即可，它已经改成 `fp16`：
+
+```json
+"bf16": false,
+"fp16": true,
+"model_dtype": "float16"
+```
+
+如果你的显卡和 PyTorch 明确支持 bf16，再把它改回：
+
+```json
+"bf16": true,
+"fp16": false,
+"model_dtype": "bfloat16"
 ```
 
 如果显存够，可以在 `configs/sft_qwen35_4b.json` 里调大：

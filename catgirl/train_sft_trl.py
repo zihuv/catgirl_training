@@ -33,6 +33,17 @@ def get_value(args: argparse.Namespace, config: dict[str, Any], name: str, defau
     return config.get(name, default) if value is None else value
 
 
+def get_model_dtype(config: dict[str, Any]) -> torch.dtype:
+    dtype_name = str(config.get("model_dtype", "")).lower()
+    if dtype_name in {"float16", "fp16", "half"}:
+        return torch.float16
+    if dtype_name in {"bfloat16", "bf16"}:
+        return torch.bfloat16
+    if bool(config.get("fp16", False)):
+        return torch.float16
+    return torch.bfloat16
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="TRL SFT LoRA training for the catgirl model.")
     parser.add_argument("--config", default=None)
@@ -78,7 +89,7 @@ def main() -> int:
     tokenizer.padding_side = "right"
 
     model_kwargs = {
-        "torch_dtype": torch.bfloat16,
+        "torch_dtype": get_model_dtype(config),
         "trust_remote_code": True,
     }
     if config.get("attn_implementation"):
@@ -108,7 +119,8 @@ def main() -> int:
         "num_train_epochs": float(get_value(args, config, "num_train_epochs", 1.0)),
         "lr_scheduler_type": config.get("lr_scheduler_type", "cosine"),
         "warmup_ratio": float(config.get("warmup_ratio", 0.03)),
-        "bf16": bool(config.get("bf16", True)),
+        "bf16": bool(config.get("bf16", False)),
+        "fp16": bool(config.get("fp16", True)),
         "logging_steps": int(get_value(args, config, "logging_steps", 10)),
         "save_steps": int(get_value(args, config, "save_steps", 200)),
         "save_total_limit": int(get_value(args, config, "save_total_limit", 2)),
